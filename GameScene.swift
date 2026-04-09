@@ -20,6 +20,13 @@ class GameScene: SKScene {
     // MARK: - Player
     var playerJet: SKSpriteNode!
 
+    // MARK: - Enemy
+    var enemyAtlas: SKTextureAtlas!
+    let maxEnemies = 3
+    var activeEnemies: [EnemyJet] = []
+    var lastEnemySpawnTime: TimeInterval = 0
+    let enemySpawnInterval: TimeInterval = 8.0
+    
     // MARK: - Armament
     var armamentAtlas: SKTextureAtlas!
     
@@ -27,9 +34,18 @@ class GameScene: SKScene {
     let maxMissileRange: CGFloat = 1200.0
     var roundsPerMinute: CGFloat = 900
     var lastGunFireTime: TimeInterval = 0.0
+    var isGunButtonHeld: Bool = false
     
     var activeBullets: [SKSpriteNode] = []
     var activeMissiles: [SKSpriteNode] = []
+    
+    // MARK: - Missile Lock
+    var lockedTarget: EnemyJet? = nil
+    var lockProgress: CGFloat = 0.0
+    var lockIndicator: SKShapeNode!
+    var lockLabel: SKLabelNode!
+    let lockRange: CGFloat = 500
+    let lockAcquireTime: CGFloat = 1.5
     
     // MARK: - Camera
     var cam: SKCameraNode!
@@ -61,6 +77,7 @@ class GameScene: SKScene {
         
         createTileSet()
         armamentAtlas = SKTextureAtlas(named: "Armament")
+        enemyAtlas = SKTextureAtlas(named: "Jets")
         createPlayer()
         setupCamera()
         setupControls()
@@ -121,6 +138,49 @@ class GameScene: SKScene {
         addChild(playerJet)
     }
 
+    // MARK: - Enemy Spawning
+    func spawnEnemy() {
+        guard activeEnemies.count < maxEnemies else { return }
+        guard let view = self.view else { return }
+
+        let spriteName = EnemyJet.spriteNames.randomElement()!
+        let texture = enemyAtlas.textureNamed(spriteName)
+        texture.filteringMode = .nearest
+
+        let enemy = EnemyJet(texture: texture)
+        enemy.setScale(0.09)
+        enemy.zPosition = 1
+        enemy.turnRate = CGFloat.random(in: 0.025...0.05)
+        enemy.flySpeed = CGFloat.random(in: 1.8...2.8)
+
+        // Spawn off screen relative to camera
+        let halfW = view.bounds.width / 2 + 200
+        let halfH = view.bounds.height / 2 + 200
+        let side = Int.random(in: 0...3)
+        var spawnPos = CGPoint.zero
+
+        switch side {
+        case 0: spawnPos = CGPoint(x: cam.position.x + CGFloat.random(in: -halfW...halfW),
+                                    y: cam.position.y + halfH)
+        case 1: spawnPos = CGPoint(x: cam.position.x + CGFloat.random(in: -halfW...halfW),
+                                    y: cam.position.y - halfH)
+        case 2: spawnPos = CGPoint(x: cam.position.x + halfW,
+                                    y: cam.position.y + CGFloat.random(in: -halfH...halfH))
+        default: spawnPos = CGPoint(x: cam.position.x - halfW,
+                                     y: cam.position.y + CGFloat.random(in: -halfH...halfH))
+        }
+
+        enemy.position = spawnPos
+        let dx = playerJet.position.x - spawnPos.x
+        let dy = playerJet.position.y - spawnPos.y
+        enemy.heading = atan2(-dx, dy)
+        enemy.zRotation = enemy.heading
+        enemy.zRotation = enemy.heading
+
+        addChild(enemy)
+        activeEnemies.append(enemy)
+    }
+    
     // MARK: - Camera
 
     func setupCamera() {
@@ -207,6 +267,24 @@ class GameScene: SKScene {
         cam.addChild(gunButton)
         cam.addChild(missileButton)
         cam.addChild(bombButton)
+        
+        // LOCK INDICATOR
+        lockIndicator = SKShapeNode(circleOfRadius: 36)
+        lockIndicator.strokeColor = .green
+        lockIndicator.fillColor = .clear
+        lockIndicator.lineWidth = 2
+        lockIndicator.alpha = 0
+        lockIndicator.zPosition = 1100
+        cam.addChild(lockIndicator)
+
+        lockLabel = SKLabelNode(text: "LOCK")
+        lockLabel.fontName = "AvenirNext-Bold"
+        lockLabel.fontSize = 13
+        lockLabel.fontColor = .green
+        lockLabel.verticalAlignmentMode = .center
+        lockLabel.position = CGPoint(x: 0, y: -52)
+        lockLabel.alpha = 0
+        lockIndicator.addChild(lockLabel)
     }
 
     func makeButton(named: String, label: String, radius: CGFloat, position: CGPoint) -> SKShapeNode {
@@ -233,6 +311,11 @@ class GameScene: SKScene {
 
     override func update(_ currentTime: TimeInterval) {
         updateChunks()
+        
+        // Gun held logic
+        if isGunButtonHeld {
+            fireGun()
+        }
 
         // Throttle controls forward speed
         let minSpeed: CGFloat = 1.2
@@ -255,6 +338,15 @@ class GameScene: SKScene {
         cam.position.x += (playerJet.position.x - cam.position.x) * cameraSpeed
         cam.position.y += (playerJet.position.y - cam.position.y) * cameraSpeed
         
+        updateEnemies(currentTime: currentTime)
+        updateLockOn()
+        
+        // Spawn enemies on interval
+        if currentTime - lastEnemySpawnTime >= enemySpawnInterval {
+            lastEnemySpawnTime = currentTime
+            spawnEnemy()
+        }
+        
         // Projectile Updates
         let bulletSpeed: CGFloat = 12.0
         let missileSpeed: CGFloat = 8.0
@@ -265,8 +357,10 @@ class GameScene: SKScene {
             bullet.position.x += -sin(heading) * bulletSpeed
             bullet.position.y += cos(heading) * bulletSpeed
 
-            let dist = hypot(bullet.position.x - playerJet.position.x,
-                             bullet.position.y - playerJet.position.y)
+            // REPLACE old dist check with this:
+            let spawnX = bullet.userData?.value(forKey: "spawnX") as! CGFloat
+            let spawnY = bullet.userData?.value(forKey: "spawnY") as! CGFloat
+            let dist = hypot(bullet.position.x - spawnX, bullet.position.y - spawnY)
             if dist > maxBulletRange {
                 bullet.removeFromParent()
                 return false
@@ -275,19 +369,172 @@ class GameScene: SKScene {
         }
 
         activeMissiles = activeMissiles.filter { missile in
-            let heading = missile.userData?.value(forKey: "heading") as! CGFloat
+            var heading = missile.userData?.value(forKey: "heading") as! CGFloat
+            let isEnemy = missile.userData?.value(forKey: "isEnemy") as? Bool ?? false
+
+            if !isEnemy, let target = missile.userData?.value(forKey: "target") as? EnemyJet,
+               target.parent != nil {
+                let dx = target.position.x - missile.position.x
+                let dy = target.position.y - missile.position.y
+                let angleToTarget = atan2(dx, dy)
+
+                var angleDiff = angleToTarget - heading
+                while angleDiff > .pi  { angleDiff -= 2 * .pi }
+                while angleDiff < -.pi { angleDiff += 2 * .pi }
+
+                heading += angleDiff * 0.06
+                missile.userData?.setValue(heading, forKey: "heading")
+                missile.zRotation = heading
+            }
 
             missile.position.x += -sin(heading) * missileSpeed
-            missile.position.y += cos(heading) * missileSpeed
+            missile.position.y +=  cos(heading) * missileSpeed
 
-            let dist = hypot(missile.position.x - playerJet.position.x,
-                             missile.position.y - playerJet.position.y)
+            // REPLACE old origin/dist check with this:
+            let spawnX = missile.userData?.value(forKey: "spawnX") as! CGFloat
+            let spawnY = missile.userData?.value(forKey: "spawnY") as! CGFloat
+            let dist = hypot(missile.position.x - spawnX, missile.position.y - spawnY)
             if dist > maxMissileRange {
                 missile.removeFromParent()
                 return false
             }
             return true
         }
+    }
+    
+    // MARK: - Enemy AI
+    func updateEnemies(currentTime: TimeInterval) {
+        activeEnemies = activeEnemies.filter { enemy in
+            guard enemy.parent != nil else { return false }
+
+            let dx = playerJet.position.x - enemy.position.x
+            let dy = playerJet.position.y - enemy.position.y
+            let distToPlayer = hypot(dx, dy)
+
+            // Despawn if too far from player
+            if distToPlayer > 1000 {
+                enemy.removeFromParent()
+                return false
+            }
+
+            // Correct angle using same convention as movement (-sin/cos)
+            let angleToPlayer = atan2(-dx, dy)
+
+            // Check if enemy is behind the player
+            let playerFacing = playerJet.zRotation
+            var angleBehindPlayer = (playerFacing + .pi) - angleToPlayer
+            while angleBehindPlayer > .pi  { angleBehindPlayer -= 2 * .pi }
+            while angleBehindPlayer < -.pi { angleBehindPlayer += 2 * .pi }
+            let isBehindPlayer = abs(angleBehindPlayer) < 0.6
+
+            enemy.stateTimer -= 1.0 / 60.0
+
+            if enemy.stateTimer <= 0 {
+                switch enemy.state {
+                case .pursuing:
+                    if distToPlayer < 300 && isBehindPlayer {
+                        enemy.stateTimer = 0.3
+                    } else if distToPlayer < 200 {
+                        enemy.state = .evading
+                        enemy.stateTimer = TimeInterval(CGFloat.random(in: 0.8...1.5))
+                    } else {
+                        enemy.stateTimer = 0.3
+                    }
+                case .strafing:
+                    enemy.state = .pursuing
+                    enemy.stateTimer = TimeInterval(CGFloat.random(in: 0.5...1.2))
+                case .evading:
+                    enemy.state = .pursuing
+                    enemy.stateTimer = TimeInterval(CGFloat.random(in: 1.0...2.0))
+                }
+            }
+
+            var targetAngle = angleToPlayer
+
+            switch enemy.state {
+            case .pursuing:
+                if distToPlayer > 300 {
+                    targetAngle = angleToPlayer
+                } else if !isBehindPlayer {
+                    let sideOffset: CGFloat = angleBehindPlayer > 0 ? .pi * 0.6 : -.pi * 0.6
+                    targetAngle = angleToPlayer + sideOffset
+                } else {
+                    targetAngle = angleToPlayer
+                }
+            case .strafing:
+                targetAngle = angleToPlayer + (.pi * 0.4)
+            case .evading:
+                targetAngle = angleToPlayer + .pi + CGFloat.random(in: -0.5...0.5)
+            }
+
+            // Smooth rotation
+            var angleDiff = targetAngle - enemy.heading
+            while angleDiff > .pi  { angleDiff -= 2 * .pi }
+            while angleDiff < -.pi { angleDiff += 2 * .pi }
+            enemy.heading += angleDiff * enemy.turnRate * 4
+            enemy.zRotation = enemy.heading
+
+            // Move forward using corrected vector
+            let effectiveSpeed = distToPlayer > 400 ? enemy.flySpeed * 1.3 : enemy.flySpeed
+            enemy.position.x += -sin(enemy.heading) * effectiveSpeed
+            enemy.position.y +=  cos(enemy.heading) * effectiveSpeed
+
+            // Gun attack
+            let gunRange: CGFloat = 300
+            if distToPlayer < gunRange && isBehindPlayer {
+                let fireInterval = 60.0 / 400.0
+                if currentTime - enemy.lastGunFireTime >= fireInterval {
+                    enemy.lastGunFireTime = currentTime
+                    spawnEnemyBullet(from: enemy)
+                }
+            }
+
+            // Missile attack
+            let missileRange: CGFloat = 600
+            let missileCooldown: TimeInterval = 10.0
+            if distToPlayer < missileRange && isBehindPlayer &&
+               currentTime - enemy.lastMissileFireTime >= missileCooldown {
+                enemy.lastMissileFireTime = currentTime
+                spawnEnemyMissile(from: enemy)
+            }
+
+            return true
+        }
+    }
+
+    func spawnEnemyBullet(from enemy: EnemyJet) {
+        let texture = armamentAtlas.textureNamed("round")
+        texture.filteringMode = .nearest
+        let bullet = SKSpriteNode(texture: texture)
+        bullet.setScale(0.07)
+        bullet.zRotation = enemy.heading
+        bullet.position = enemy.position
+        bullet.zPosition = 0.9
+        bullet.name = "enemyBullet"
+        bullet.userData = NSMutableDictionary()
+        bullet.userData?.setValue(enemy.heading, forKey: "heading")
+        bullet.userData?.setValue(enemy.position.x, forKey: "spawnX")
+        bullet.userData?.setValue(enemy.position.y, forKey: "spawnY")
+        addChild(bullet)
+        activeBullets.append(bullet)
+    }
+
+    func spawnEnemyMissile(from enemy: EnemyJet) {
+        let texture = armamentAtlas.textureNamed("aim120")
+        texture.filteringMode = .nearest
+        let missile = SKSpriteNode(texture: texture)
+        missile.setScale(0.08)
+        missile.zRotation = enemy.heading
+        missile.position = enemy.position
+        missile.zPosition = 0.9
+        missile.name = "enemyMissile"
+        missile.userData = NSMutableDictionary()
+        missile.userData?.setValue(enemy.heading, forKey: "heading")
+        missile.userData?.setValue(true, forKey: "isEnemy")
+        missile.userData?.setValue(enemy.position.x, forKey: "spawnX")
+        missile.userData?.setValue(enemy.position.y, forKey: "spawnY")
+        addChild(missile)
+        activeMissiles.append(missile)
     }
 
     // MARK: - Touches
@@ -314,7 +561,7 @@ class GameScene: SKScene {
             if touchedNode.name == "flareButton" {
                 deployFlare()
             } else if touchedNode.name == "gunButton" {
-                fireGun()
+                isGunButtonHeld = true
             } else if touchedNode.name == "missileButton" {
                 fireMissile()
             } else if touchedNode.name == "bombButton" {
@@ -344,6 +591,8 @@ class GameScene: SKScene {
                 resetJoystick()
             } else if touch == throttleTouch {
                 throttleTouch = nil
+            } else {
+                isGunButtonHeld = false
             }
         }
     }
@@ -428,23 +677,34 @@ class GameScene: SKScene {
         activeBullets.append(bullet)
         bullet.userData = NSMutableDictionary()
         bullet.userData?.setValue(playerJet.zRotation, forKey: "heading")
+        
+        bullet.userData?.setValue(playerJet.position.x, forKey: "spawnX")
+        bullet.userData?.setValue(playerJet.position.y, forKey: "spawnY")
     }
 
     func fireMissile() {
         let texture = armamentAtlas.textureNamed("aim120")
         texture.filteringMode = .nearest
         let missile = SKSpriteNode(texture: texture)
-        missile.setScale(0.12)
+        missile.setScale(0.08)
         missile.zRotation = playerJet.zRotation
         missile.position = playerJet.position
         missile.zPosition = 0.9
-        
-        // Store heading at time of firing
         missile.userData = NSMutableDictionary()
         missile.userData?.setValue(playerJet.zRotation, forKey: "heading")
-        
+
+        // Attach lock target if acquired
+        if let target = lockedTarget {
+            missile.userData?.setValue(target, forKey: "target")
+            lockProgress = 0
+            lockedTarget = nil
+        }
+
         addChild(missile)
         activeMissiles.append(missile)
+        
+        missile.userData?.setValue(playerJet.position.x, forKey: "spawnX")
+        missile.userData?.setValue(playerJet.position.y, forKey: "spawnY")
     }
 
     func dropBomb() {
@@ -478,7 +738,7 @@ class GameScene: SKScene {
 
             // Drift slightly backwards and to the side as it fades
             let drift = SKAction.moveBy(
-                x: sin(playerJet.zRotation) * -40,
+                x: -sin(playerJet.zRotation) * -40,
                 y: cos(playerJet.zRotation) * -40,
                 duration: 1.8
             )
@@ -487,6 +747,51 @@ class GameScene: SKScene {
             let group = SKAction.group([drift, fade, shrink])
             let remove = SKAction.removeFromParent()
             flare.run(SKAction.sequence([group, remove]))
+    }
+    
+    // MARK: - Missile Lock
+    func updateLockOn() {
+        // Find closest enemy in range
+        var closestEnemy: EnemyJet? = nil
+        var closestDist = lockRange
+
+        for enemy in activeEnemies {
+            let dist = hypot(enemy.position.x - playerJet.position.x,
+                             enemy.position.y - playerJet.position.y)
+            if dist < closestDist {
+                closestDist = dist
+                closestEnemy = enemy
+            }
+        }
+
+        if let target = closestEnemy {
+            // Advance lock progress
+            lockProgress = min(lockProgress + (1.0 / 60.0) / lockAcquireTime, 1.0)
+            lockedTarget = lockProgress >= 1.0 ? target : nil
+
+            // Position indicator over target in camera space
+            let targetInCam = convert(target.position, to: cam)
+            lockIndicator.position = targetInCam
+            lockIndicator.alpha = 1.0
+            lockIndicator.strokeColor = lockProgress >= 1.0 ? .red : .green
+
+            // Blink when locked
+            if lockProgress >= 1.0 {
+                lockLabel.alpha = lockLabel.alpha == 1.0 ? 0.0 : 1.0
+            } else {
+                lockLabel.alpha = 0
+                // Shrink indicator as lock progresses
+                let scale = 1.0 + (1.0 - lockProgress) * 0.8
+                lockIndicator.setScale(scale)
+            }
+
+        } else {
+            // No target in range — reset
+            lockProgress = 0
+            lockedTarget = nil
+            lockIndicator.alpha = 0
+            lockLabel.alpha = 0
+        }
     }
 
     // MARK: - Terrain System
@@ -616,6 +921,29 @@ class GameScene: SKScene {
 
         return tileMap
     }
+}
+
+// MARK: - Enemy Jet Class
+class EnemyJet: SKSpriteNode {
+
+    enum AIState {
+        case pursuing
+        case strafing
+        case evading
+    }
+
+    var state: AIState = .pursuing
+    var health: Int = 3
+    var lastGunFireTime: TimeInterval = 0
+    var lastMissileFireTime: TimeInterval = 0
+    var stateTimer: TimeInterval = 0
+    var heading: CGFloat = 0
+
+    // How aggressively this enemy turns (randomized per instance)
+    var turnRate: CGFloat = 0.03
+    var flySpeed: CGFloat = 2.2
+
+    static let spriteNames = ["f4", "f18", "f16", "f35", "j20", "mig19", "mig35", "su57"]
 }
 
 
