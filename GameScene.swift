@@ -16,6 +16,12 @@ class GameScene: SKScene {
 
     var loadedChunks: [String: SKTileMapNode] = [:]
     var terrainTileSet: SKTileSet!
+    
+    // MARK: - Score / Game State
+    var score: Int = 0
+    var scoreLabel: SKLabelNode!
+
+    var isGameOver: Bool = false
 
     // MARK: - Player
     var playerJet: SKSpriteNode!
@@ -26,6 +32,8 @@ class GameScene: SKScene {
     var activeEnemies: [EnemyJet] = []
     var lastEnemySpawnTime: TimeInterval = 0
     let enemySpawnInterval: TimeInterval = 8.0
+    let enemyInitialSpawnDelay: TimeInterval = 5.0
+    var gameStartTime: TimeInterval = 0
     
     // MARK: - Armament
     var armamentAtlas: SKTextureAtlas!
@@ -45,7 +53,9 @@ class GameScene: SKScene {
     var lockIndicator: SKShapeNode!
     var lockLabel: SKLabelNode!
     let lockRange: CGFloat = 500
-    let lockAcquireTime: CGFloat = 1.5
+    let lockAcquireTime: CGFloat = 0.5
+    let lockConeAngle: CGFloat = CGFloat.pi / 4 // 45 degrees total-ish
+    var lockingTarget: EnemyJet? = nil
     
     // MARK: - Camera
     var cam: SKCameraNode!
@@ -81,9 +91,25 @@ class GameScene: SKScene {
         createPlayer()
         setupCamera()
         setupControls()
+        setupScoreLabel()
         throttleInput = 0.35
         setThrottleKnobPosition()
         updateChunks()
+    }
+    
+    // MARK: - Score UI
+    
+    func setupScoreLabel() {
+        scoreLabel = SKLabelNode(text: "Score: 0")
+        scoreLabel.fontName = "AvenirNext-Bold"
+        scoreLabel.fontSize = 24
+        scoreLabel.fontColor = .white
+        scoreLabel.zPosition = 1200
+        if let view = self.view {
+            let halfHeight = view.bounds.height / 2
+            scoreLabel.position = CGPoint(x: 0, y: halfHeight - 50)
+        }
+        cam.addChild(scoreLabel)
     }
 
     // MARK: - Tile Map Creation
@@ -148,7 +174,8 @@ class GameScene: SKScene {
         texture.filteringMode = .nearest
 
         let enemy = EnemyJet(texture: texture)
-        enemy.setScale(0.09)
+        let scale = EnemyJet.spriteScales[spriteName] ?? 0.09
+        enemy.setScale(scale)
         enemy.zPosition = 1
         enemy.turnRate = CGFloat.random(in: 0.025...0.05)
         enemy.flySpeed = CGFloat.random(in: 1.8...2.8)
@@ -312,6 +339,10 @@ class GameScene: SKScene {
     override func update(_ currentTime: TimeInterval) {
         updateChunks()
         
+        if gameStartTime == 0 {
+            gameStartTime = currentTime
+        }
+        
         // Gun held logic
         if isGunButtonHeld {
             fireGun()
@@ -342,7 +373,10 @@ class GameScene: SKScene {
         updateLockOn()
         
         // Spawn enemies on interval
-        if currentTime - lastEnemySpawnTime >= enemySpawnInterval {
+        let timeSinceStart = currentTime - gameStartTime
+
+        if timeSinceStart >= enemyInitialSpawnDelay &&
+           currentTime - lastEnemySpawnTime >= enemySpawnInterval {
             lastEnemySpawnTime = currentTime
             spawnEnemy()
         }
@@ -400,6 +434,104 @@ class GameScene: SKScene {
             }
             return true
         }
+        
+        checkCombatCollisions()
+    }
+    
+    // MARK: - Asset Collision
+    func checkCombatCollisions() {
+        guard !isGameOver else { return }
+
+        // Player bullets/missiles hitting enemies
+        for enemy in activeEnemies {
+            guard enemy.parent != nil else { continue }
+
+            for bullet in activeBullets {
+                guard bullet.parent != nil else { continue }
+
+                let isEnemyBullet = bullet.name == "enemyBullet"
+                if !isEnemyBullet && bullet.frame.intersects(enemy.frame) {
+                    destroyEnemy(enemy)
+                    bullet.removeFromParent()
+                    return
+                }
+            }
+
+            for missile in activeMissiles {
+                guard missile.parent != nil else { continue }
+
+                let isEnemyMissile = missile.name == "enemyMissile"
+                if !isEnemyMissile && missile.frame.intersects(enemy.frame) {
+                    destroyEnemy(enemy)
+                    missile.removeFromParent()
+                    return
+                }
+            }
+        }
+
+        // Enemy bullets/missiles hitting player
+        for bullet in activeBullets {
+            if bullet.name == "enemyBullet" && bullet.frame.intersects(playerJet.frame) {
+                triggerDefeat()
+                return
+            }
+        }
+
+        for missile in activeMissiles {
+            if missile.name == "enemyMissile" && missile.frame.intersects(playerJet.frame) {
+                triggerDefeat()
+                return
+            }
+        }
+    }
+    
+    // MARK: - Enemy Destruction
+    
+    func destroyEnemy(_ enemy: EnemyJet) {
+        enemy.removeFromParent()
+        activeEnemies.removeAll { $0 == enemy }
+
+        score += 1
+        scoreLabel.text = "Score: \(score)"
+    }
+    
+    func makeMenuButton(text: String, name: String, position: CGPoint) -> SKLabelNode {
+        let button = SKLabelNode(text: text)
+        button.name = name
+        button.fontName = "AvenirNext-Bold"
+        button.fontSize = 28
+        button.fontColor = .white
+        button.position = position
+        button.zPosition = 2002
+        return button
+    }
+    
+    // MARK: - Player Destruction / Defeat
+    
+    func triggerDefeat() {
+        isGameOver = true
+
+        playerJet.removeFromParent()
+
+        let overlay = SKSpriteNode(color: .red, size: CGSize(width: 1000, height: 1000))
+        overlay.alpha = 0.85
+        overlay.zPosition = 2000
+        overlay.name = "defeatOverlay"
+        cam.addChild(overlay)
+
+        let defeatLabel = SKLabelNode(text: "DEFEAT")
+        defeatLabel.fontName = "AvenirNext-Bold"
+        defeatLabel.fontSize = 56
+        defeatLabel.fontColor = .white
+        defeatLabel.position = CGPoint(x: 0, y: 80)
+        defeatLabel.zPosition = 2001
+        overlay.addChild(defeatLabel)
+
+        let replayButton = makeMenuButton(text: "REPLAY", name: "replayButton", position: CGPoint(x: 0, y: -20))
+        let menuButton = makeMenuButton(text: "MAIN MENU", name: "mainMenuButton", position: CGPoint(x: 0, y: -100))
+
+        overlay.addChild(replayButton)
+        overlay.addChild(menuButton)
     }
     
     // MARK: - Enemy AI
@@ -545,6 +677,19 @@ class GameScene: SKScene {
         for touch in touches {
             let location = touch.location(in: cam)
             let touchedNode = cam.atPoint(location)
+            
+            if isGameOver {
+                if touchedNode.name == "replayButton" {
+                    let newScene = GameScene(size: self.size)
+                    newScene.scaleMode = self.scaleMode
+                    view?.presentScene(newScene, transition: .fade(withDuration: 0.5))
+                } else if touchedNode.name == "mainMenuButton" {
+                    let menuScene = MainMenuScene(size: self.size)
+                    menuScene.scaleMode = self.scaleMode
+                    view?.presentScene(menuScene, transition: .fade(withDuration: 0.5))
+                }
+                return
+            }
 
             if joystickTouch == nil && joystickBase.contains(location) {
                 joystickTouch = touch
@@ -751,42 +896,56 @@ class GameScene: SKScene {
     
     // MARK: - Missile Lock
     func updateLockOn() {
-        // Find closest enemy in range
-        var closestEnemy: EnemyJet? = nil
-        var closestDist = lockRange
+        var bestTarget: EnemyJet? = nil
+        var bestDistance = lockRange
+
+        let playerHeading = playerJet.zRotation
 
         for enemy in activeEnemies {
-            let dist = hypot(enemy.position.x - playerJet.position.x,
-                             enemy.position.y - playerJet.position.y)
-            if dist < closestDist {
-                closestDist = dist
-                closestEnemy = enemy
+            guard enemy.parent != nil else { continue }
+
+            let dx = enemy.position.x - playerJet.position.x
+            let dy = enemy.position.y - playerJet.position.y
+            let dist = hypot(dx, dy)
+
+            guard dist <= lockRange else { continue }
+
+            // Angle from player to enemy using your movement convention
+            let angleToEnemy = atan2(-dx, dy)
+
+            var angleDiff = angleToEnemy - playerHeading
+            while angleDiff > .pi { angleDiff -= 2 * .pi }
+            while angleDiff < -.pi { angleDiff += 2 * .pi }
+
+            // Enemy must be inside forward cone
+            if abs(angleDiff) <= lockConeAngle {
+                if dist < bestDistance {
+                    bestDistance = dist
+                    bestTarget = enemy
+                }
             }
         }
 
-        if let target = closestEnemy {
-            // Advance lock progress
+        if let target = bestTarget {
+
+            if lockingTarget !== target {
+                lockingTarget = target
+                lockProgress = 0
+            }
+
             lockProgress = min(lockProgress + (1.0 / 60.0) / lockAcquireTime, 1.0)
             lockedTarget = lockProgress >= 1.0 ? target : nil
 
-            // Position indicator over target in camera space
             let targetInCam = convert(target.position, to: cam)
             lockIndicator.position = targetInCam
             lockIndicator.alpha = 1.0
             lockIndicator.strokeColor = lockProgress >= 1.0 ? .red : .green
+            lockIndicator.setScale(lockProgress >= 1.0 ? 1.0 : 1.0 + (1.0 - lockProgress) * 0.8)
 
-            // Blink when locked
-            if lockProgress >= 1.0 {
-                lockLabel.alpha = lockLabel.alpha == 1.0 ? 0.0 : 1.0
-            } else {
-                lockLabel.alpha = 0
-                // Shrink indicator as lock progresses
-                let scale = 1.0 + (1.0 - lockProgress) * 0.8
-                lockIndicator.setScale(scale)
-            }
+            lockLabel.alpha = lockProgress >= 1.0 ? 1.0 : 0.0
 
         } else {
-            // No target in range — reset
+            lockingTarget = nil
             lockProgress = 0
             lockedTarget = nil
             lockIndicator.alpha = 0
@@ -944,7 +1103,15 @@ class EnemyJet: SKSpriteNode {
     var flySpeed: CGFloat = 2.2
 
     static let spriteNames = ["f4", "f18", "f16", "f35", "j20", "mig19", "mig35", "su57"]
+    
+    static let spriteScales: [String: CGFloat] = [
+        "f4": 0.1,
+        "f18": 0.25,
+        "f16": 0.2,
+        "f35": 0.25,
+        "j20": 0.09,
+        "mig19": 0.1,
+        "mig35": 0.1,
+        "su57": 0.25
+    ]
 }
-
-
-
