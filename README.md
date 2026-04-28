@@ -1,5 +1,5 @@
 Hello World!
-Experience the exhilerating life of a fighter pilot with this fun app!
+Experience the exhilarating life of a fighter pilot with this fun app!
 
 System Requirements:
 MacOS with Xcode
