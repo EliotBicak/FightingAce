@@ -10,27 +10,32 @@ import SpriteKit
 import GameplayKit
 
 class GameViewController: UIViewController {
+
     override func viewDidLoad() {
         super.viewDidLoad()
-        
-        // Make sure the view is an SKView
+
         if let view = self.view as? SKView {
-            
-            // Create your GameScene
-            let scene = GameScene(size: view.bounds.size)
+
+            let scene = MainMenuScene(size: view.bounds.size)
             scene.scaleMode = .aspectFill
-            
-            // Present the Scene
+
             view.presentScene(scene)
-            
-            // OPTIONAL Debug Info
+
             view.ignoresSiblingOrder = true
             view.showsFPS = true
             view.showsNodeCount = true
         }
     }
-    
+
     override var prefersStatusBarHidden: Bool {
         return true
+    }
+
+    override var supportedInterfaceOrientations: UIInterfaceOrientationMask {
+        return .landscapeLeft
+    }
+
+    override var shouldAutorotate: Bool {
+        return false
     }
 }
